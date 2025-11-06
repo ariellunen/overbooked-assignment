@@ -28,40 +28,34 @@ app.post("/api/message", async (req, res) => {
     if (!conversationId)
       return res.status(400).json({ error: "Missing conversationId" });
 
-    // Check if conversation exists
-    let convo = db
+    // Check if the conversation actually exists
+    const convo = db
       .prepare("SELECT id FROM conversations WHERE id = ?")
       .get(conversationId);
 
-    // If conversation doesn't exist, create a new one
     if (!convo) {
-      const createdAt = new Date().toISOString();
-      const title = `Conversation #${conversationId}`;
-      const result = db
-        .prepare("INSERT INTO conversations (title, createdAt) VALUES (?, ?)")
-        .run(title, createdAt);
-      convo = { id: result.lastInsertRowid };
+      return res.status(404).json({ error: "Conversation not found" });
     }
 
-    // Send to mock LLM
+    // Send content to mock LLM
     const response = await axios.post(process.env.LLM_URL, { content });
+    const reply = response.data?.completion || "Mock response unavailable";
 
-    const reply = response.data.completion;
-
-    // Save both user and assistant messages under the correct conversation ID
+    // Save both user and assistant messages
     const timestamp = new Date().toISOString();
-    db.prepare(
-      "INSERT INTO messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, ?)"
-    ).run(convo.id, "user", content, timestamp);
 
     db.prepare(
       "INSERT INTO messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, ?)"
-    ).run(convo.id, "assistant", reply, timestamp);
+    ).run(conversationId, "user", content, timestamp);
 
-    // Return messages back to frontend
+    db.prepare(
+      "INSERT INTO messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, ?)"
+    ).run(conversationId, "assistant", reply, timestamp);
+
+    // Return to frontend
     return res.json({
-      message: { role: "user", content, conversationId: convo.id },
-      reply: { role: "assistant", content: reply, conversationId: convo.id },
+      message: { role: "user", content, conversationId },
+      reply: { role: "assistant", content: reply, conversationId },
     });
   } catch (err) {
     console.error("Error talking to mock-LLM:", err.message);
@@ -88,12 +82,12 @@ app.get("/api/conversations/:id/messages", (req, res) => {
       .prepare(
         `SELECT * FROM messages 
         WHERE conversationId = ? AND createdAt < ? 
-        ORDER BY createdAt DESC 
+        ORDER BY createdAt ASC 
         LIMIT ?`
       )
       .all(id, before, limit);
 
-    res.json(messages.reverse());
+    res.json(messages);
   } catch (err) {
     console.error("Error fetching messages:", err.message);
     res.status(500).json({ error: "Failed to fetch messages" });
