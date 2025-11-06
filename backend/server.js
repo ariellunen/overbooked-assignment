@@ -1,3 +1,6 @@
+require("dotenv").config();
+console.log("💡 LLM_URL is:", process.env.LLM_URL);
+
 const { default: axios } = require("axios");
 
 const express = require("express");
@@ -10,8 +13,6 @@ const db = require("./db");
 
 app.use(cors());
 
-require("dotenv").config();
-
 app.use(express.json());
 
 app.get("/", (req, res) => {
@@ -20,34 +21,47 @@ app.get("/", (req, res) => {
 
 app.post("/api/message", async (req, res) => {
   try {
-    const { content } = req.body;
+    const { content, conversationId } = req.body;
+    console.log("Incoming message:", req.body);
+
     if (!content) return res.status(400).json({ error: "Missing content" });
+    if (!conversationId)
+      return res.status(400).json({ error: "Missing conversationId" });
 
-    // send to mock-LLM
-    const response = await axios.post(LLM_URL, { content });
-    const reply = response.data.completion;
+    // Check if conversation exists
+    let convo = db
+      .prepare("SELECT id FROM conversations WHERE id = ?")
+      .get(conversationId);
 
-    // save the message and reply in the database
-    let convo = db.prepare("SELECT id FROM conversations WHERE id = 1").get();
+    // If conversation doesn't exist, create a new one
     if (!convo) {
-      db.prepare(
-        "INSERT INTO conversations (title, createdAt) VALUES (?, ?)"
-      ).run("Conversation #1", new Date().toISOString());
-      convo = { id: 1 };
+      const createdAt = new Date().toISOString();
+      const title = `Conversation #${conversationId}`;
+      const result = db
+        .prepare("INSERT INTO conversations (title, createdAt) VALUES (?, ?)")
+        .run(title, createdAt);
+      convo = { id: result.lastInsertRowid };
     }
 
+    // Send to mock LLM
+    const response = await axios.post(process.env.LLM_URL, { content });
+
+    const reply = response.data.completion;
+
+    // Save both user and assistant messages under the correct conversation ID
+    const timestamp = new Date().toISOString();
     db.prepare(
       "INSERT INTO messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, ?)"
-    ).run(convo.id, "user", content, new Date().toISOString());
+    ).run(convo.id, "user", content, timestamp);
 
     db.prepare(
       "INSERT INTO messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, ?)"
-    ).run(convo.id, "assistant", reply, new Date().toISOString());
+    ).run(convo.id, "assistant", reply, timestamp);
 
-    // return to client
+    // Return messages back to frontend
     return res.json({
-      message: { role: "user", content },
-      reply: { role: "assistant", content: reply },
+      message: { role: "user", content, conversationId: convo.id },
+      reply: { role: "assistant", content: reply, conversationId: convo.id },
     });
   } catch (err) {
     console.error("Error talking to mock-LLM:", err.message);
