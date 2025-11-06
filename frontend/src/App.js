@@ -10,7 +10,7 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-
+  const [undoData, setUndoData] = useState(null);
   // Fetch all conversations on load
   useEffect(() => {
     axios
@@ -86,6 +86,42 @@ function App() {
     setSelected(res.data.id); // ← Then set selected (triggers fetch)
   };
 
+  const deleteConversation = async (id) => {
+    try {
+      await axios.delete(`http://localhost:3001/api/conversations/${id}`);
+      const deletedConvo = conversations.find((c) => c.id === id);
+      setConversations((prev) =>
+        prev.filter((conversation) => conversation.id !== id)
+      );
+      if (selected === id) {
+        setSelected(null);
+        setMessages([]);
+      }
+      // Show undo option
+      setUndoData({ id, title: deletedConvo.title });
+      // Clear undo option after 5 seconds
+      setTimeout(() => setUndoData(null), 5000);
+    } catch (err) {
+      console.error("Error deleting conversation:", err.message);
+    }
+  };
+
+  const undoDelete = async () => {
+    if (!undoData) return;
+    try {
+      await axios.post(
+        `http://localhost:3001/api/conversations/${undoData.id}/undo`
+      );
+
+      // reload conversations after undo
+      const res = await axios.get("http://localhost:3001/api/conversations");
+      setConversations(res.data);
+      setUndoData(null);
+    } catch (err) {
+      console.error("Error restoring conversation:", err.message);
+    }
+  };
+
   return (
     <div className="flex h-screen bg-gray-50 text-gray-900">
       {/* Sidebar */}
@@ -97,17 +133,37 @@ function App() {
           {conversations.map((c) => (
             <div
               key={c.id}
-              className={`p-2 rounded cursor-pointer text-sm ${
+              className={`flex justify-between items-center p-2 rounded cursor-pointer text-sm ${
                 selected === c.id
                   ? "bg-gray-200 font-medium"
                   : "hover:bg-gray-100"
               }`}
-              onClick={() => setSelected(c.id)}
             >
-              {c.title}
+              <div className="flex-1" onClick={() => setSelected(c.id)}>
+                {c.title}
+              </div>
+              <button
+                className="text-red-500 text-xs ml-2"
+                onClick={() => deleteConversation(c.id)}
+              >
+                Delete
+              </button>
             </div>
           ))}
         </div>
+
+        {/* Undo Toast */}
+        {undoData && (
+          <div className="mt-3 p-2 bg-yellow-100 text-sm rounded flex justify-between items-center">
+            <span>Deleted {undoData.title}</span>
+            <button
+              className="text-blue-600 font-medium ml-2"
+              onClick={undoDelete}
+            >
+              Undo
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Chat window */}
@@ -141,6 +197,7 @@ function App() {
             onKeyDown={(e) => e.key === "Enter" && sendMessage()}
             placeholder="Type your message..."
             className="flex-1"
+            disabled={loading}
           />
           <Button onClick={sendMessage} disabled={loading}>
             {loading ? "..." : "Send"}
