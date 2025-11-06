@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import axios from "axios";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
@@ -11,6 +11,7 @@ function App() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [undoData, setUndoData] = useState(null);
+  const messagesEndRef = useRef(null);
   // Fetch all conversations on load
   useEffect(() => {
     axios
@@ -31,6 +32,16 @@ function App() {
         .catch(() => setMessages([]));
     }
   }, [selected]);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const scrollToBottom = () => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  };
 
   // Send a new message to the backend
   const sendMessage = async () => {
@@ -187,6 +198,7 @@ function App() {
               </CardContent>
             </Card>
           ))}
+          <div ref={messagesEndRef} />
         </div>
 
         {/* Input area */}
