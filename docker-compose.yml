@@ -9,6 +9,11 @@ services:
       - ./backend/.env
     depends_on:
       - mock-llm
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
   mock-llm:
     build: ./mock-llm
     ports:

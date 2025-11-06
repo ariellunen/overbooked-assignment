@@ -200,6 +200,33 @@ app.post("/api/conversations/:id/undo", (req, res) => {
   }
 });
 
+app.get("/api/healthz", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+app.get("/api/readyz", async (req, res) => {
+  try {
+    // check for the database
+    db.prepare("SELECT 1").get();
+
+    // check for the LLM service
+    const response = await axios.post(
+      process.env.LLM_URL,
+      { content: "ping" },
+      { timeout: 2000 }
+    );
+
+    if (response.status === 200) {
+      res.json({ ready: true });
+    } else {
+      res.status(503).json({ ready: false, error: "LLM returned bad status" });
+    }
+  } catch (err) {
+    console.error("Ready check failed:", err.message);
+    res.status(503).json({ ready: false, error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
