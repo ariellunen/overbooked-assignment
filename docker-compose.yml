@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  mock-llm:
+    build: ./mock-llm
+    container_name: mock-llm
+    ports:
+      - "8080:8080"
+
+  backend:
+    build: ./backend
+    container_name: backend
+    ports:
+      - "3001:3001"
+    depends_on:
+      - mock-llm
+    environment:
+      - PORT=3001
+      - LLM_URL=http://mock-llm:8080/complete
