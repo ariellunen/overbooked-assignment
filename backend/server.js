@@ -1,7 +1,9 @@
 require("dotenv").config();
-console.log("💡 LLM_URL is:", process.env.LLM_URL);
 
 const { default: axios } = require("axios");
+
+const { createAdapter } = require("./llm/adapter");
+const adapter = createAdapter(process.env.LLM_PROVIDER);
 
 const express = require("express");
 const cors = require("cors");
@@ -19,50 +21,6 @@ app.get("/", (req, res) => {
   res.send(`Hello World! Server is running on port ${PORT}`);
 });
 
-app.post("/api/message", async (req, res) => {
-  try {
-    const { content, conversationId } = req.body;
-    console.log("Incoming message:", req.body);
-
-    if (!content) return res.status(400).json({ error: "Missing content" });
-    if (!conversationId)
-      return res.status(400).json({ error: "Missing conversationId" });
-
-    // Check if the conversation actually exists
-    const convo = db
-      .prepare("SELECT id FROM conversations WHERE id = ?")
-      .get(conversationId);
-
-    if (!convo) {
-      return res.status(404).json({ error: "Conversation not found" });
-    }
-
-    // Send content to mock LLM
-    const response = await axios.post(process.env.LLM_URL, { content });
-    const reply = response.data?.completion || "Mock response unavailable";
-
-    // Save both user and assistant messages
-    const timestamp = new Date().toISOString();
-
-    db.prepare(
-      "INSERT INTO messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, ?)"
-    ).run(conversationId, "user", content, timestamp);
-
-    db.prepare(
-      "INSERT INTO messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, ?)"
-    ).run(conversationId, "assistant", reply, timestamp);
-
-    // Return to frontend
-    return res.json({
-      message: { role: "user", content, conversationId },
-      reply: { role: "assistant", content: reply, conversationId },
-    });
-  } catch (err) {
-    console.error("Error talking to mock-LLM:", err.message);
-    return res.status(500).json({ error: "Upstream error/timeout" });
-  }
-});
-
 app.get("/api/conversations", (req, res) => {
   const conversations = db
     .prepare("SELECT * FROM conversations WHERE deletedAt IS NULL")
@@ -73,24 +31,98 @@ app.get("/api/conversations", (req, res) => {
 app.get("/api/conversations/:id/messages", (req, res) => {
   try {
     const { id } = req.params;
-    // pagination, limit and before timestamp
-    const limit = parseInt(req.query.limit) || 20;
-    const before = req.query.before || new Date().toISOString();
 
-    // Fetch all messages belonging to this conversation
     const messages = db
       .prepare(
-        `SELECT * FROM messages 
-        WHERE conversationId = ? AND createdAt < ? 
-        ORDER BY createdAt ASC 
-        LIMIT ?`
+        `SELECT id, conversationId, role, content, createdAt
+         FROM messages
+         WHERE conversationId = ?
+         ORDER BY createdAt ASC`
       )
-      .all(id, before, limit);
+      .all(id);
 
     res.json(messages);
   } catch (err) {
     console.error("Error fetching messages:", err.message);
     res.status(500).json({ error: "Failed to fetch messages" });
+  }
+});
+
+app.post("/api/conversations/:id/messages", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content } = req.body;
+
+    if (!content) return res.status(400).json({ error: "Missing content" });
+
+    // Check if conversation exists
+    const convo = db
+      .prepare("SELECT id FROM conversations WHERE id = ?")
+      .get(id);
+
+    if (!convo) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+
+    const timestamp = new Date().toISOString();
+
+    // ✅ SAVE USER MESSAGE FIRST (before calling LLM)
+    const userMsgResult = db
+      .prepare(
+        "INSERT INTO messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, ?)"
+      )
+      .run(id, "user", content, timestamp);
+
+    // Fetch conversation history (including the message we just saved)
+    const history = db
+      .prepare(
+        "SELECT role, content FROM messages WHERE conversationId = ? ORDER BY createdAt ASC"
+      )
+      .all(id);
+
+    try {
+      // Send entire conversation to selected LLM adapter (with retry logic inside adapter)
+      const { completion: reply } = await adapter.complete(history);
+
+      // Save assistant message
+      const assistantMsgResult = db
+        .prepare(
+          "INSERT INTO messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, ?)"
+        )
+        .run(id, "assistant", reply, timestamp);
+
+      // Return to frontend with proper format
+      return res.json({
+        message: {
+          id: userMsgResult.lastInsertRowid,
+          role: "user",
+          content,
+          createdAt: timestamp,
+        },
+        reply: {
+          id: assistantMsgResult.lastInsertRowid,
+          role: "assistant",
+          content: reply,
+          createdAt: timestamp,
+        },
+      });
+    } catch (llmError) {
+      // ✅ User message is already saved, just return error about LLM failure
+      console.error("LLM failed after retries:", llmError.message);
+
+      return res.status(503).json({
+        error: "LLM service unavailable after retries",
+        message: {
+          id: userMsgResult.lastInsertRowid,
+          role: "user",
+          content,
+          createdAt: timestamp,
+        },
+      });
+    }
+  } catch (err) {
+    console.error("Error in message endpoint:", err.message);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
