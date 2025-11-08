@@ -12,6 +12,13 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [undoData, setUndoData] = useState(null);
   const messagesEndRef = useRef(null);
+  const [pageInfo, setPageInfo] = useState({
+    nextCursor: null,
+    prevCursor: null,
+  });
+  const abortControllerRef = useRef(null);
+  const PAGE_SIZE = 3; // Change this to test pagination easily
+
   // Fetch all conversations on load
   useEffect(() => {
     axios
@@ -26,9 +33,27 @@ function App() {
   // Load messages for the selected conversation
   useEffect(() => {
     if (selected) {
+      setMessages([]);
+      setPageInfo({ nextCursor: null, prevCursor: null });
+      console.log("📤 Sending message:", input, "for convo:", selected);
+      console.log("📄 Page info now:", pageInfo);
+
       axios
-        .get(`http://localhost:3001/api/conversations/${selected}/messages`)
-        .then((res) => setMessages(res.data))
+        .get(
+          `http://localhost:3001/api/conversations/${selected}/messages?limit=${PAGE_SIZE}`
+        )
+        .then((res) => {
+          console.log("📥 Initial load:", {
+            messageCount: res.data.messages.length,
+            messageIds: res.data.messages.map((m) => m.id),
+            pageInfo: res.data.pageInfo,
+          });
+          setMessages(res.data.messages || []);
+          setPageInfo({
+            nextCursor: res.data.nextCursor || null,
+            prevCursor: res.data.prevCursor || null,
+          });
+        })
         .catch(() => setMessages([]));
     }
   }, [selected]);
@@ -48,43 +73,40 @@ function App() {
     if (!input.trim() || !selected) return;
     setLoading(true);
 
-    const maxRetries = 2;
-    let attempt = 0;
-    let success = false;
+    // Create abort controller for this request
+    abortControllerRef.current = new AbortController();
 
-    while (attempt <= maxRetries && !success) {
-      try {
-        const res = await axios.post(
-          `http://localhost:3001/api/conversations/${selected}/messages`,
-          { content: input },
-          { timeout: 12000 }
-        );
-
-        setMessages((prev) => [...prev, res.data.message, res.data.reply]);
-        setInput("");
-        success = true;
-      } catch (e) {
-        attempt++;
-        console.error(`❌ Send message error (try ${attempt})`, e.message);
-
-        // Retry if it's a server error or timeout
-        if (
-          attempt <= maxRetries &&
-          (e.code === "ECONNABORTED" || e.response?.status >= 500)
-        ) {
-          const backoff = 1000 * Math.pow(2, attempt - 1); // 1s, 2s
-          console.log(`⏳ Retrying in ${backoff}ms...`);
-          await new Promise((resolve) => setTimeout(resolve, backoff));
-        } else {
-          alert(
-            "Message failed to send after retries. Please try again later."
-          );
-          break;
+    try {
+      const res = await axios.post(
+        `http://localhost:3001/api/conversations/${selected}/messages`,
+        { content: input },
+        {
+          timeout: 12000,
+          signal: abortControllerRef.current.signal,
         }
-      }
-    }
+      );
 
-    setLoading(false);
+      setMessages((prev) => [...prev, res.data.message, res.data.reply]);
+      setInput("");
+    } catch (e) {
+      if (axios.isCancel(e)) {
+        console.log("Request cancelled by user");
+      } else {
+        console.error("Send message error:", e.message);
+        alert("Message failed to send. Please try again.");
+      }
+    } finally {
+      setLoading(false);
+      abortControllerRef.current = null;
+    }
+  };
+
+  // Cancel in-flight request
+  const cancelSend = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      setLoading(false);
+    }
   };
 
   // Create a new conversation
@@ -93,8 +115,8 @@ function App() {
     console.log("Created conversation:", res.data);
 
     setConversations((prev) => [...prev, res.data]);
-    setMessages([]); // ← Clear FIRST
-    setSelected(res.data.id); // ← Then set selected (triggers fetch)
+    setMessages([]);
+    setSelected(res.data.id);
   };
 
   const deleteConversation = async (id) => {
@@ -133,10 +155,52 @@ function App() {
     }
   };
 
+  const loadOlderMessages = async () => {
+    if (!pageInfo.nextCursor) return;
+
+    try {
+      const res = await axios.get(
+        `http://localhost:3001/api/conversations/${selected}/messages?cursor=${pageInfo.nextCursor}&limit=${PAGE_SIZE}`
+      );
+
+      // אם אין הודעות נוספות, נעלים את הכפתור
+      if (!res.data.messages.length) {
+        setPageInfo({ nextCursor: null, prevCursor: null });
+        return;
+      }
+
+      // נוסיף את ההודעות החדשות לראש הרשימה
+      setMessages((prev) => [...res.data.messages, ...prev]);
+
+      setPageInfo({
+        ...pageInfo,
+        nextCursor: res.data.nextCursor,
+      });
+    } catch (err) {
+      console.error("Error loading older messages:", err.message);
+    }
+  };
+
+  const loadNewerMessages = async () => {
+    if (!pageInfo.prevCursor) return;
+
+    try {
+      const res = await axios.get(
+        `http://localhost:3001/api/conversations/${selected}/messages?cursor=${pageInfo.prevCursor}&direction=newer&limit=${PAGE_SIZE}`
+      );
+
+      // Append newer messages
+      setMessages((prev) => [...prev, ...res.data.messages]);
+      setPageInfo(res.data.pageInfo);
+    } catch (err) {
+      console.error("Error loading newer messages:", err.message);
+    }
+  };
+
   return (
-    <div className="flex h-screen bg-gray-50 text-gray-900">
+    <div className="flex flex-col md:flex-row h-screen bg-gray-50 text-gray-900">
       {/* Sidebar */}
-      <div className="w-64 border-r bg-white p-4 flex flex-col">
+      <div className="w-full md:w-64 border-r md:border-b-0 border-b bg-white p-4 flex flex-col max-h-48 md:max-h-full overflow-y-auto md:overflow-visible">
         <Button onClick={createConversation} className="mb-4 w-full">
           New Chat
         </Button>
@@ -150,11 +214,14 @@ function App() {
                   : "hover:bg-gray-100"
               }`}
             >
-              <div className="flex-1" onClick={() => setSelected(c.id)}>
+              <div
+                className="flex-1 truncate"
+                onClick={() => setSelected(c.id)}
+              >
                 {c.title}
               </div>
               <button
-                className="text-red-500 text-xs ml-2"
+                className="text-red-500 text-xs ml-2 flex-shrink-0"
                 onClick={() => deleteConversation(c.id)}
               >
                 Delete
@@ -166,9 +233,9 @@ function App() {
         {/* Undo Toast */}
         {undoData && (
           <div className="mt-3 p-2 bg-yellow-100 text-sm rounded flex justify-between items-center">
-            <span>Deleted {undoData.title}</span>
+            <span className="truncate">Deleted {undoData.title}</span>
             <button
-              className="text-blue-600 font-medium ml-2"
+              className="text-blue-600 font-medium ml-2 flex-shrink-0"
               onClick={undoDelete}
             >
               Undo
@@ -178,43 +245,75 @@ function App() {
       </div>
 
       {/* Chat window */}
-      <div className="flex flex-col flex-1">
-        <div className="flex-1 overflow-y-auto p-6 space-y-3">
-          {messages.length === 0 && (
+      <div className="flex flex-col flex-1 min-h-0">
+        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-3">
+          {!selected && (
+            <div className="text-center text-gray-400 mt-20">
+              Select a conversation or create a new one
+            </div>
+          )}
+
+          {selected && messages.length === 0 && (
             <div className="text-center text-gray-400 mt-20">
               Start chatting...
             </div>
           )}
-          {messages.map((m, i) => (
+
+          {pageInfo.nextCursor && (
+            <div className="text-center mb-2">
+              <Button variant="outline" size="sm" onClick={loadOlderMessages}>
+                Load older messages
+              </Button>
+            </div>
+          )}
+
+          {messages.map((m) => (
             <Card
-              key={i}
+              key={m.id}
               className={`max-w-xl ${
                 m.role === "user" ? "ml-auto bg-blue-50" : "mr-auto bg-gray-100"
               }`}
             >
               <CardContent className="p-3">
                 <p className="text-xs text-gray-500 mb-1">{m.role}</p>
-                <p className="whitespace-pre-wrap">{m.content}</p>
+                <p className="whitespace-pre-wrap break-words">{m.content}</p>
               </CardContent>
             </Card>
           ))}
+
+          {pageInfo.prevCursor && (
+            <div className="text-center mt-2">
+              <Button variant="outline" size="sm" onClick={loadNewerMessages}>
+                Load newer messages
+              </Button>
+            </div>
+          )}
+
           <div ref={messagesEndRef} />
         </div>
 
         {/* Input area */}
-        <div className="border-t bg-white p-4 flex gap-2">
-          <Input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-            placeholder="Type your message..."
-            className="flex-1"
-            disabled={loading}
-          />
-          <Button onClick={sendMessage} disabled={loading}>
-            {loading ? "..." : "Send"}
-          </Button>
-        </div>
+        {selected && (
+          <div className="border-t bg-white p-3 md:p-4 flex gap-2">
+            <Input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && !loading && sendMessage()}
+              placeholder="Type your message..."
+              className="flex-1"
+              disabled={loading}
+            />
+            {loading ? (
+              <Button onClick={cancelSend} variant="destructive">
+                Cancel
+              </Button>
+            ) : (
+              <Button onClick={sendMessage} disabled={!input.trim()}>
+                Send
+              </Button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

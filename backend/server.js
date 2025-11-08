@@ -31,17 +31,47 @@ app.get("/api/conversations", (req, res) => {
 app.get("/api/conversations/:id/messages", (req, res) => {
   try {
     const { id } = req.params;
+    const limit = parseInt(req.query.limit) || 3;
+    const cursor = parseInt(req.query.cursor) || null;
 
-    const messages = db
-      .prepare(
-        `SELECT id, conversationId, role, content, createdAt
-         FROM messages
-         WHERE conversationId = ?
-         ORDER BY createdAt ASC`
-      )
-      .all(id);
+    let query, params;
 
-    res.json(messages);
+    if (cursor) {
+      // כשיש cursor — נטען הודעות ישנות יותר
+      query = `
+        SELECT id, conversationId, role, content, createdAt
+        FROM messages
+        WHERE conversationId = ? AND id < ?
+        ORDER BY id DESC
+        LIMIT ?`;
+      params = [id, cursor, limit];
+    } else {
+      // טעינה ראשונית — ההודעות החדשות ביותר
+
+      query = `
+  SELECT id, conversationId, role, content, createdAt
+  FROM messages
+  WHERE conversationId = ?
+  ORDER BY id ASC
+  LIMIT -1 OFFSET (
+    SELECT COUNT(*) - ?
+    FROM messages
+    WHERE conversationId = ?
+  )
+`;
+      params = [id, limit, id];
+    }
+
+    const rows = db.prepare(query).all(...params);
+    const messages = rows.reverse(); // שיהיו מהישן לחדש
+
+    const nextCursor = messages.length ? messages[0].id : null;
+    const hasMore = messages.length === limit;
+
+    res.json({
+      messages,
+      nextCursor: hasMore ? nextCursor : null,
+    });
   } catch (err) {
     console.error("Error fetching messages:", err.message);
     res.status(500).json({ error: "Failed to fetch messages" });
